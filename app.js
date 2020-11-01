@@ -1,286 +1,435 @@
 'use strict';
 
-const express = require('express');
-const exphbs = require('express-handlebars');
-const bodyParser = require('body-parser');
-const port = process.env.PORT || 8080;
-const mongoose = require('mongoose');
-const path = require('path');
-const favicon = require('serve-favicon');
-const breadcrumb = require('express-url-breadcrumb');
-const validator = require('validator');
-const app = express();
+(function() {
 
-mongoose.Promise = Promise;
-mongoose.connect('mongodb://admin:admin@mongodb2.70uyc.mongodb.net/mongoDB2');
+    function serialize(form) {
+        var elements = form.querySelectorAll('input, select, textarea');
+        var output = {};
+        for(var i = 0; i < elements.length; i++) {
+            var element = elements[i];
+            if(element.hasAttribute('name')) {
+                output[element.getAttribute('name')] = element.value;
+            }
+        }
+        return output;
+    }
 
-const Restaurants = require('./models/Restaurants');
-const helpers = require('./lib/helpers');
-const SingleRestaurant = require('./lib/restaurant');
-const Mail = require('./lib/mail');
-const config = require('./lib/config');
+    function after(el, referenceNode) {
+        referenceNode.parentNode.insertBefore(el, referenceNode.nextSibling);
+    }
 
-app.disable('x-powered-by');
-
-app.engine('.hbs', exphbs({
-    extname: '.hbs',
-    defaultLayout: 'main',
-    helpers: helpers
-}));
-
-app.set('view engine', '.hbs');
-app.set('env', 'development');
+    function ajax(options) {
+        options = options || {};
+        options.method = options.method || 'GET';
+        options.url = options.url || location.href;
+        options.type = options.type || 'text';
+        options.data = options.data || {};
+        options.success = options.success || function() {};
+        options.error = options.error || function() {};
 
 
-app.use(favicon(path.join(__dirname, 'favicon.png')));
-app.use('/public', express.static(path.join(__dirname, '/public'), {
-  maxAge: 0,
-  dotfiles: 'ignore',
-  etag: false
-}));
+        var query = [];
+        for(var p in options.data) {
+           var s = p + '=' + encodeURIComponent(options.data[p]);
+           query.push(s);
+        }
+        var data = (query.length > 1 ) ? query.join('&') : query.join('');
 
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: false }));
+        var xhr = new XMLHttpRequest();
+        xhr.open(options.method, options.url);
+        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
 
-app.locals.isSingle = false;
-app.locals.apiKey = config.apiKey;
+        xhr.onload = function() {
+            if (xhr.status === 200) {
+                var response;
+                switch(options.type) {
+                    case 'html':
+                    case 'text':
+                        response = xhr.responseText;
+                        break;
+                    case 'json':
+                        response = JSON.parse(xhr.responseText);
+                        break;
+                    case 'xml':
+                        response = xhr.responseXML;
+                        break;
+                    default:
+                        response = xhr.responseText;
+                        break;
+                }
+                options.success(response);
 
+            } else {
+                options.error(xhr.status);
+            }
+        };
+        xhr.send(data);
 
-app.get('/', (req, res) => {
-  Restaurants.find().limit(9).then(restaurants => {
-      res.render('home', {
-          pageTitle: 'Restaurants App',
-          restaurants: restaurants
-      });
-  }).catch(err => {
-      res.render('error', {
-          error: 'Unable to get restaurants',
-          pageTitle: 'Error'
-      });
-  });
+    }
 
-});
+    function Voting() {
+        this.init();
+    }
 
-app.get('/restaurants', (req, res) => {
-    Restaurants.find().limit(9).then(restaurants => {
-        res.render('restaurants', {
-            pageTitle: 'Restaurants',
-            restaurants: restaurants
-        });
-    }).catch(err => {
-        res.render('error', {
-            error: 'Unable to get restaurants',
-            pageTitle: 'Error'
-        });
-    });
+    Voting.prototype = {
+        init: function() {
+            this.form = document.querySelector('#voting-form');
+            if(this.form !== null) {
+                this.vote();
+            }
+        },
+        vote: function() {
+            var vote = this.form.querySelector('#vote');
+            var grade = this.form.querySelector('#grade');
+            var restaurantId = this.form.querySelector('#restaurant_id');
 
-});
+            this.form.addEventListener('submit', function(e) {
+               e.preventDefault();
+               if(/^\d+$/.test(vote.value) && parseInt(vote.value, 10) <= 100 && grade.value.length > 0) {
+                   ajax({
+                       method: 'POST',
+                       url: '/vote/',
+                       type: 'json',
+                       data: {
+                           id: restaurantId.value,
+                           vote: vote.value,
+                           grade: grade.value
+                       },
+                       success: function(resp) {
+                           var score = document.querySelector('#score');
+                           var total = parseInt(score.firstChild.nodeValue, 10);
+                           var tableBody = document.querySelector('#grades tbody');
+                           var firstTr = tableBody.querySelectorAll('tr')[0];
+                           var grade = document.createElement('tr');
+                           grade.innerHTML = '<td>' + resp.date + '</td><td>' + resp.grade + '</td><td>' + resp.score + '</td>';
+                           tableBody.insertBefore(grade, firstTr);
 
-app.get('/restaurants/:id', breadcrumb(), (req, res) => {
-   if(validator.isNumeric(req.params.id)) {
-       Restaurants.findOne({restaurant_id: req.params.id}).then(restaurant => {
-           SingleRestaurant.getRelated(
-               Restaurants,
-               restaurant,
-               {
-                   borough: restaurant.borough,
-                   cuisine: restaurant.cuisine
-               }).then(related => {
-               res.render('single', {
-                   pageTitle: restaurant.name,
-                   restaurant: restaurant,
-                   related: related,
-                   isSingle: true
-               });
-           }).catch(err => {
-               res.render('error', {
-                   error: 'Unable to get related restaurants',
-                   pageTitle: 'Error'
-               });
-           });
-       }).catch(err => {
-           res.render('error', {
-               error: 'Unable to get restaurant',
-               pageTitle: 'Error'
-           });
-       });
-   } else {
-      res.sendStatus(404);
-   }
-});
-
-app.get('/top-ten', (req, res) => {
-
-    SingleRestaurant.getTop(Restaurants).then(results => {
-        res.render('top-ten', {
-            pageTitle: 'Top Ten',
-            restaurants: results
-        });
-    }).catch(err => {
-        res.render('error', {
-            error: 'Unable to get restaurants',
-            pageTitle: 'Error'
-        });
-    });
-
-
-});
-
-app.post('/search', (req, res) => {
-    let q = req.body.q;
-    let query = {
-        name: { "$regex": q, "$options": "i" }
-    };
-
-    Restaurants.find(query).limit(6).then(rests => {
-        if(rests && rests.length && rests.length > 0) {
-            res.render('search-results', {
-                pageTitle: 'Search results',
-                restaurants: rests
-            });
-        } else {
-            res.render('search-results', {
-                pageTitle: 'Search results',
-                restaurants: false
+                           score.innerHTML = total + resp.score;
+                       },
+                       error: function(status) {
+                           console.log(status);
+                       }
+                   });
+               }
             });
         }
-    }).catch(err => {
-        res.render('error', {
-            error: 'Unable to get restaurants',
-            pageTitle: 'Error'
-        });
+    };
+
+
+
+    function app() {
+        this.init();
+    }
+
+    app.prototype = {
+        init: function() {
+            this.setMap();
+            this.vote();
+            this.menu();
+            this.booking();
+            this.setRelatedMaps();
+        },
+        menu: function() {
+            var nav = document.querySelector('#navigation');
+
+            document.querySelector('#open-nav').addEventListener('click', function(e) {
+               e.preventDefault();
+               nav.className = 'visible';
+            });
+            document.querySelector('#close-nav').addEventListener('click', function(e) {
+                e.preventDefault();
+                nav.className = '';
+            });
+        },
+        booking: function() {
+            var book = document.querySelector('#book');
+            if(book !== null) {
+                book.addEventListener('click', function(e) {
+                   e.preventDefault();
+                   document.querySelector('#booking').className = 'visible';
+                });
+                document.querySelector('#close-booking').addEventListener('click', function(e) {
+                    e.preventDefault();
+                    document.querySelector('#booking').className = '';
+                });
+
+                flatpickr('#datehour', { enableTime: true, time_24hr: true });
+
+                document.querySelector('#booking-form').addEventListener('submit', function(e) {
+                   e.preventDefault();
+                   var bf = this;
+                   var query = serialize(bf);
+                   var msgs = document.querySelectorAll('.msg');
+                   for(var i = 0; i < msgs.length; i++) {
+                       var msg = msgs[i];
+                       msg.parentNode.removeChild(msg);
+                   }
+
+                   ajax({
+                        method: 'POST',
+                        url: '/book/',
+                        type: 'json',
+                        data: query,
+                        success: function(resp) {
+                            if(resp.errors) {
+                                resp.errors.forEach(function(err) {
+                                   var el = document.querySelector('[name=' + err.attr + ']');
+                                   var m = document.createElement('div');
+                                   m.className = 'msg error';
+                                   m.innerHTML = err.msg;
+                                   after(m, el);
+                                });
+                            } else {
+                                var m = document.createElement('div');
+                                m.className = 'msg success';
+                                m.innerHTML = resp.success;
+                                bf.appendChild(m);
+                            }
+                        },
+                        error: function(status) {
+                            console.log(status);
+                        }
+                    });
+                });
+            }
+        },
+        vote: function() {
+            var v = new Voting();
+        },
+        setMap: function() {
+            var map = document.getElementById('map');
+            if(map !== null) {
+                var coordsAttr = map.dataset.coords;
+                var coordsArr = coordsAttr.split(',');
+                var restaurant = {lat: Number(coordsArr[1]), lng: Number(coordsArr[0])};
+                if(google) {
+                    var _map = new google.maps.Map(map, {
+                        zoom: 10,
+                        center: restaurant
+                    });
+                    var marker = new google.maps.Marker({
+                        position: restaurant,
+                        map: _map
+                    });
+                }
+            }
+        },
+        setRelatedMaps: function() {
+            var map = document.getElementById('related-map');
+            var mainMap = document.getElementById('map');
+            if(map !== null && mainMap !== null) {
+                var restaurants = map.dataset.restaurants;
+                var data = JSON.parse(restaurants);
+                var coordsAttr = mainMap.dataset.coords;
+                var coordsArr = coordsAttr.split(',');
+                var restaurant = {lat: Number(coordsArr[1]), lng: Number(coordsArr[0])};
+
+                if(google) {
+                    var _mainMap = new google.maps.Map(map, {
+                        zoom: 10,
+                        center: restaurant,
+                        styles: [
+                            {
+                                "featureType": "all",
+                                "elementType": "labels.text.fill",
+                                "stylers": [
+                                    {
+                                        "saturation": 36
+                                    },
+                                    {
+                                        "color": "#333333"
+                                    },
+                                    {
+                                        "lightness": 40
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "all",
+                                "elementType": "labels.text.stroke",
+                                "stylers": [
+                                    {
+                                        "visibility": "on"
+                                    },
+                                    {
+                                        "color": "#ffffff"
+                                    },
+                                    {
+                                        "lightness": 16
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "all",
+                                "elementType": "labels.icon",
+                                "stylers": [
+                                    {
+                                        "visibility": "off"
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "administrative",
+                                "elementType": "geometry.fill",
+                                "stylers": [
+                                    {
+                                        "color": "#fefefe"
+                                    },
+                                    {
+                                        "lightness": 20
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "administrative",
+                                "elementType": "geometry.stroke",
+                                "stylers": [
+                                    {
+                                        "color": "#fefefe"
+                                    },
+                                    {
+                                        "lightness": 17
+                                    },
+                                    {
+                                        "weight": 1.2
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "landscape",
+                                "elementType": "geometry",
+                                "stylers": [
+                                    {
+                                        "color": "#f5f5f5"
+                                    },
+                                    {
+                                        "lightness": 20
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "poi",
+                                "elementType": "geometry",
+                                "stylers": [
+                                    {
+                                        "color": "#f5f5f5"
+                                    },
+                                    {
+                                        "lightness": 21
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "poi.park",
+                                "elementType": "geometry",
+                                "stylers": [
+                                    {
+                                        "color": "#dedede"
+                                    },
+                                    {
+                                        "lightness": 21
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "road.highway",
+                                "elementType": "geometry.fill",
+                                "stylers": [
+                                    {
+                                        "color": "#ffffff"
+                                    },
+                                    {
+                                        "lightness": 17
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "road.highway",
+                                "elementType": "geometry.stroke",
+                                "stylers": [
+                                    {
+                                        "color": "#ffffff"
+                                    },
+                                    {
+                                        "lightness": 29
+                                    },
+                                    {
+                                        "weight": 0.2
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "road.arterial",
+                                "elementType": "geometry",
+                                "stylers": [
+                                    {
+                                        "color": "#ffffff"
+                                    },
+                                    {
+                                        "lightness": 18
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "road.local",
+                                "elementType": "geometry",
+                                "stylers": [
+                                    {
+                                        "color": "#ffffff"
+                                    },
+                                    {
+                                        "lightness": 16
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "transit",
+                                "elementType": "geometry",
+                                "stylers": [
+                                    {
+                                        "color": "#f2f2f2"
+                                    },
+                                    {
+                                        "lightness": 19
+                                    }
+                                ]
+                            },
+                            {
+                                "featureType": "water",
+                                "elementType": "geometry",
+                                "stylers": [
+                                    {
+                                        "color": "#e9e9e9"
+                                    },
+                                    {
+                                        "lightness": 17
+                                    }
+                                ]
+                            }
+                        ]
+                    });
+
+                    var infowindow = new google.maps.InfoWindow();
+                    var marker;
+                    data.forEach(function(datum, i) {
+                        marker = new google.maps.Marker({
+                            position: new google.maps.LatLng(Number(datum.coords[1]), Number(datum.coords[0])),
+                            map: _mainMap
+                        });
+                        google.maps.event.addListener(marker, 'click', (function(marker, i) {
+                            return function() {
+                                infowindow.setContent('<div class="map-wrap"><a class="map-title" href="' + datum.link + '">' + datum.name + '</a><p class="map-img"><img src="' + datum.image + '" class="responsive"></p></div>');
+                                infowindow.open(_mainMap, marker);
+                            }
+                        })(marker, i));
+                    });
+                }
+
+            }
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        var _app = new app();
     });
-
-});
-
-app.post('/vote', (req, res) => {
-   let id = req.body.id;
-   let vote = req.body.vote;
-   let grade = req.body.grade;
-   let now = new Date();
-
-   let valid = true;
-   let grades = 'A,B,C,D,E,F'.split('');
-
-   if(!validator.isMongoId(id)) {
-       valid = false;
-   }
-   if(!validator.isNumeric(vote)) {
-       valid = false;
-   }
-   if(!validator.isInt(vote, {min: 0, max: 100})) {
-       valid = false;
-   }
-
-   if(grades.indexOf(grade) === -1) {
-       valid = false;
-   }
-
-   if(!valid) {
-       res.sendStatus(403);
-   } else {
-
-       let updated = {
-           date: now,
-           grade: grade,
-           score: parseInt(vote, 10)
-       };
-
-       Restaurants.findByIdAndUpdate(id, {
-           $push: {
-               grades: {
-                   $each: [updated],
-                   $position: 0
-               }
-           }
-       }).then(result => {
-
-           let output = {
-               score: vote,
-               grade: grade,
-               date: now.toLocaleDateString()
-           };
-
-           res.json(output);
-       }).catch(err => {
-           res.status(403).send(err);
-       });
-   }
-});
-
-app.post('/book', (req, res) => {
-    let first = req.body.firstname;
-    let last = req.body.lastname;
-    let email = req.body.email;
-    let persons = req.body.persons;
-    let date = req.body.datehour;
-
-    let errors = [];
-
-    if(validator.isEmpty(first)) {
-        errors.push({
-           attr: 'firstname',
-           msg: 'Required field'
-        });
-    }
-
-    if(validator.isEmpty(last)) {
-        errors.push({
-            attr: 'lastname',
-            msg: 'Required field'
-        });
-    }
-
-    if(!validator.isEmail(email)) {
-        errors.push({
-            attr: 'email',
-            msg: 'Invalid e-mail address'
-        });
-    }
-
-    if(!validator.isInt(persons, {min: 1, max: 10})) {
-        errors.push({
-            attr: 'persons',
-            msg: 'Invalid number of persons'
-        });
-    }
-
-    if(!/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$/.test(date)) {
-        errors.push({
-            attr: 'datehour',
-            msg: 'Invalid date and hour'
-        });
-    }
-
-    if(errors.length > 0) {
-        res.json({errors: errors});
-    } else {
-        let options = {
-            from: email,
-            to: config.adminEmail,
-            subject: 'New Booking',
-            text: first + ' ' + last + '\n\n' + persons + ' persons on ' + date,
-            html: ''
-        };
-        let mailer = new Mail(options);
-
-        mailer.send().then(ok =>{
-            res.json({success: 'Booking sent successfully'});
-        }).catch(err =>{
-            res.json({errors: [{attr: 'datehour', msg: 'Oops, try again!'}]});
-        });
-    }
-});
-
-
-if (app.get('env') === 'development') {
-  app.use((err, req, res, next) => {
-    res.status(err.status || 500);
-  });
-}
-
-app.use((err, req, res, next) => {
-  res.status(err.status || 500);
-});
-
-app.listen(port);
+})();
